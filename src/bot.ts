@@ -2,6 +2,7 @@ import { Telegraf } from 'telegraf';
 import 'dotenv/config';
 import prisma from './db';
 import http from 'http';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 // Bot is now public and multi-tenant. Anyone can use it!
@@ -27,6 +28,7 @@ Just type your transaction naturally:
 • /bal - Check balances across all your accounts.
 • /acc - View your list of accounts.
 • /his - View your recent transaction history.
+• /ai <question> - Ask your AI financial assistant anything!
 
 🏦 **3. Management Commands**
 • /ca <name> - Create a new account.
@@ -382,6 +384,69 @@ bot.command('dt', async (ctx) => {
 // /hlp or /help - Help
 bot.command(['hlp', 'help'], (ctx) => {
   ctx.replyWithMarkdown(WELCOME_MESSAGE);
+});
+
+// /ai <question> - AI Financial Assistant
+bot.command('ai', async (ctx) => {
+  const userId = ctx.from.id;
+  const prompt = ctx.message.text.replace('/ai', '').trim();
+  
+  if (!prompt) {
+    return ctx.reply("Please ask a question! For example: /ai how much did I spend on food?");
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    return ctx.reply("AI is not configured. Please set the GEMINI_API_KEY environment variable.");
+  }
+
+  try {
+    const processingMsg = await ctx.reply("🤔 *Analyzing your finances...*", { parse_mode: "Markdown" });
+
+    // Fetch user's transactions
+    const accounts = await prisma.account.findMany({ 
+      where: { userId: BigInt(userId) },
+      include: { transactions: { orderBy: { date: 'desc' } } }
+    });
+
+    if (accounts.length === 0) {
+      return ctx.reply("You don't have any accounts or transactions yet to analyze.");
+    }
+
+    let txData = "User's financial data:\n\n";
+    for (const acc of accounts) {
+      txData += `Account: ${acc.name} (Balance: ₹${acc.balance})\n`;
+      txData += `Transactions:\n`;
+      for (const t of acc.transactions) {
+        const sign = t.type === 'INCOME' ? '+' : '-';
+        txData += `${t.date.toISOString().split('T')[0]} | ${t.category} | ${sign}₹${t.amount}\n`;
+      }
+      txData += "\n";
+    }
+
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const finalPrompt = `
+      You are a helpful and extremely intelligent personal finance assistant in a Telegram bot.
+      You have access to the user's transaction data below. 
+      Answer the user's question accurately based ONLY on this data. 
+      Format your response beautifully with markdown, emojis, and a friendly tone. Do not expose internal IDs.
+      If the user asks something completely unrelated to finance, politely redirect them.
+      
+      ${txData}
+      
+      User's Question: "${prompt}"
+    `;
+
+    const result = await model.generateContent(finalPrompt);
+    const text = result.response.text();
+
+    await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id);
+    ctx.replyWithMarkdown(text);
+  } catch (error) {
+    console.error("AI Error:", error);
+    ctx.reply("Sorry, I had trouble analyzing that. Please try again later!");
+  }
 });
 
 // Create a dummy HTTP server for cloud providers (like Render) that require port binding
