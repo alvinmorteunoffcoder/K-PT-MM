@@ -6,6 +6,10 @@ import http from 'http';
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 // Bot is now public and multi-tenant. Anyone can use it!
 
+function formatINR(amount: number): string {
+  return amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 const WELCOME_MESSAGE = `
 👋 *Welcome to your Personal Expense Tracker!*
 
@@ -74,10 +78,10 @@ bot.command('bal', async (ctx) => {
     let totalBalance = 0;
     let message = "💰 *Your Balances:*\n\n";
     for (const acc of accounts) {
-      message += `- ${acc.name}: ₹${acc.balance.toFixed(2)}\n`;
+      message += `- ${acc.name}: ₹${formatINR(acc.balance)}\n`;
       totalBalance += acc.balance;
     }
-    message += `\n*Total:* ₹${totalBalance.toFixed(2)}`;
+    message += `\n*Total:* ₹${formatINR(totalBalance)}`;
     
     ctx.replyWithMarkdown(message);
   } catch (error) {
@@ -203,9 +207,9 @@ bot.on('text', async (ctx, next) => {
       ]);
 
       if (type === 'INCOME') {
-        ctx.reply(`✅ Income recorded! +₹${amount.toFixed(2)} from ${category} (to ${accountName}).`);
+        ctx.reply(`✅ Income recorded! +₹${formatINR(amount)} from ${category} (to ${accountName}).`);
       } else {
-        ctx.reply(`📉 Expense recorded! -₹${amount.toFixed(2)} for ${category} (from ${accountName}).`);
+        ctx.reply(`📉 Expense recorded! -₹${formatINR(amount)} for ${category} (from ${accountName}).`);
       }
       return;
     } catch (error) {
@@ -238,7 +242,7 @@ bot.command('his', async (ctx) => {
     for (const t of transactions) {
       const sign = t.type === 'INCOME' ? '+' : '-';
       message += `\`[ID:${t.id}]\` ${t.date.toISOString().split('T')[0]} | ${t.account.name}\n`;
-      message += `${sign}₹${t.amount.toFixed(2)} - ${t.category}\n\n`;
+      message += `${sign}₹${formatINR(t.amount)} - ${t.category}\n\n`;
     }
     
     message += "To edit a transaction, use: /et <ID> <+ or -><amount> <category> [@ account]";
