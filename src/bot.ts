@@ -70,18 +70,33 @@ bot.start(async (ctx) => {
 bot.command('bal', async (ctx) => {
   const userId = ctx.from.id;
   try {
-    const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
+    const accounts = await prisma.account.findMany({ 
+      where: { userId: BigInt(userId) },
+      include: { transactions: true }
+    });
     if (accounts.length === 0) {
       return ctx.reply("You don't have any accounts. Use /start to create a default one.");
     }
     
     let totalBalance = 0;
-    let message = "💰 *Your Balances:*\n\n";
+    let totalExpenses = 0;
+    let message = "💰 *Your Summary:*\n\n";
+    
     for (const acc of accounts) {
-      message += `- ${acc.name}: ₹${formatINR(acc.balance)}\n`;
+      const accExpenses = acc.transactions
+        .filter(t => t.type === 'EXPENSE')
+        .reduce((sum, t) => sum + t.amount, 0);
+
+      message += `*${acc.name}*\n`;
+      message += `• Balance: ₹${formatINR(acc.balance)}\n`;
+      message += `• Expenses: ₹${formatINR(accExpenses)}\n\n`;
+      
       totalBalance += acc.balance;
+      totalExpenses += accExpenses;
     }
-    message += `\n*Total:* ₹${formatINR(totalBalance)}`;
+    
+    message += `*Overall Balance:* ₹${formatINR(totalBalance)}\n`;
+    message += `*Overall Expenses:* ₹${formatINR(totalExpenses)}`;
     
     ctx.replyWithMarkdown(message);
   } catch (error) {
