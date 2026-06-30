@@ -439,8 +439,12 @@ bot.command('ai', async (ctx) => {
       - /bal : Check total balances and expenses
       - /his : See transaction history
       - /ca : Create account
+      - /dt <ID> : Delete a specific transaction
+      - /da <Account> : Delete an account and all its transactions
       
-      Format your response beautifully with markdown, emojis, and a highly friendly, conversational tone. Do not expose internal IDs.
+      If the user asks to clear, delete, or reset their transactions, politely explain that you (the AI) cannot do that directly, but they can use the /dt or /da commands to do it themselves.
+      
+      Format your response beautifully with markdown, emojis, and a highly friendly, conversational tone. Do not expose internal IDs unless instructing them to use /dt.
       If the user asks something completely unrelated to finance or casual greetings, politely redirect them.
       
       ${txData}
