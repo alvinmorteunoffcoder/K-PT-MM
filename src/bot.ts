@@ -463,28 +463,48 @@ bot.command('ai', async (ctx) => {
   }
 });
 
-// Create a dummy HTTP server for cloud providers (like Render) that require port binding
-const PORT = process.env.PORT || 3000;
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('Bot is running!');
+bot.catch((err, ctx) => {
+  console.error(`Ooops, encountered an error for ${ctx.updateType}`, err);
 });
 
-server.listen(PORT, () => {
-  console.log(`Dummy health-check server listening on port ${PORT}`);
-});
+const PORT = Number(process.env.PORT) || 3000;
+const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL;
 
-bot.launch().then(() => {
-  console.log("Bot is running...");
-}).catch((err) => {
-  console.error("Failed to start bot:", err);
-});
+if (WEBHOOK_URL) {
+  // Production on Render: Use Webhook
+  bot.launch({
+    webhook: {
+      domain: WEBHOOK_URL,
+      port: PORT
+    }
+  }).then(() => {
+    console.log(`Bot is running in Webhook mode at ${WEBHOOK_URL} on port ${PORT}`);
+  }).catch((err) => {
+    console.error("Failed to start bot in Webhook mode:", err);
+  });
+} else {
+  // Local Development: Use Polling and start a dummy HTTP server if PORT is set
+  const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('Bot is running in polling mode!');
+  });
+  
+  server.listen(PORT, () => {
+    console.log(`Dummy health-check server listening on port ${PORT}`);
+  });
 
-process.once('SIGINT', () => {
-  bot.stop('SIGINT');
-  server.close();
-});
-process.once('SIGTERM', () => {
-  bot.stop('SIGTERM');
-  server.close();
-});
+  bot.launch({ dropPendingUpdates: true }).then(() => {
+    console.log("Bot is running in Polling mode...");
+  }).catch((err) => {
+    console.error("Failed to start bot in Polling mode:", err);
+  });
+
+  process.once('SIGINT', () => {
+    bot.stop('SIGINT');
+    server.close();
+  });
+  process.once('SIGTERM', () => {
+    bot.stop('SIGTERM');
+    server.close();
+  });
+}
