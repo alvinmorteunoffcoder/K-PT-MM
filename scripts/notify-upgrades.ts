@@ -14,14 +14,9 @@ We have just deployed some huge upgrades to make tracking your finances even eas
 1️⃣ **Wallet IDs**: No more typing long wallet names! Every wallet now has a simple ID (1, 2, 3...). Check your IDs with \`/acc\` and use them directly:
 Example: \`+500 Salary @ 1\` or \`-100 Food @ 2\`
 
-2️⃣ **New \`/exp\` Command**: Check your overall incomes and expenses!
-Example: \`/exp\` (Overall) or \`/exp @ 1\` (Specific Wallet)
+2️⃣ **Smarter \`/bal\`**: The \`/bal\` command is now much cleaner and strictly shows your balances!
 
-3️⃣ **Auto-Reset for Empty Wallets**: If your wallet balance drops below ₹3, the income and expenses for that wallet will secretly reset to ₹0 in \`/exp\` to start fresh! (Your transaction history will NOT be deleted and remains safe in \`/his\`).
-
-4️⃣ **Smarter \`/bal\`**: The \`/bal\` command is now much cleaner and strictly shows your balances!
-
-5️⃣ **Smarter AI Assistant**: The \`/ai\` command is now more stable and faster than ever!
+3️⃣ **Smarter AI Assistant**: The \`/ai\` command is now more stable and faster than ever!
 
 Start exploring the new features now! If you have any questions, use \`/help\`. Happy Tracking! 🚀
 `;

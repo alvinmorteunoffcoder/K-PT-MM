@@ -40,7 +40,6 @@ Just type your transaction naturally:
 
 📊 **2. Core Commands**
 • /bal - Check balances across all your accounts.
-• /exp - Check your incomes and expenses.
 • /acc - View your list of accounts and their IDs.
 • /his - View your recent transaction history.
 • /ai <question> - Ask your AI financial assistant anything!
@@ -109,74 +108,6 @@ bot.command('bal', async (ctx) => {
   } catch (error) {
     console.error(error);
     ctx.reply("Error fetching balances.");
-  }
-});
-
-// /exp [@ account] - Check expenses and incomes
-bot.command('exp', async (ctx) => {
-  const userId = ctx.from.id;
-  const text = ctx.message.text.replace('/exp', '').trim();
-  const identifier = text.startsWith('@') ? text.substring(1).trim() : text;
-
-  try {
-    const accounts = await prisma.account.findMany({ 
-      where: { userId: BigInt(userId) },
-      orderBy: { createdAt: 'asc' },
-      include: { transactions: true }
-    });
-
-    if (accounts.length === 0) {
-      return ctx.reply("You don't have any accounts.");
-    }
-
-    let targetAccounts = accounts;
-    let title = "📊 *Overall Incomes & Expenses:*\n\n";
-    let isSpecific = false;
-
-    if (identifier) {
-      const parsedId = parseInt(identifier);
-      let foundAccount = null;
-      if (!isNaN(parsedId) && parsedId > 0 && parsedId <= accounts.length) {
-        foundAccount = accounts[parsedId - 1];
-      } else {
-        foundAccount = accounts.find(a => a.name.toLowerCase() === identifier.toLowerCase());
-      }
-
-      if (!foundAccount) {
-        return ctx.reply(`Account '${identifier}' not found.`);
-      }
-      targetAccounts = [foundAccount];
-      title = `📊 *Incomes & Expenses for ${foundAccount.name}:*\n\n`;
-      isSpecific = true;
-    }
-    
-    let totalIncome = 0;
-    let totalExpense = 0;
-
-    for (const acc of targetAccounts) {
-      const validTransactions = acc.lastResetAt 
-        ? acc.transactions.filter(t => t.date >= acc.lastResetAt!)
-        : acc.transactions;
-
-      const inc = validTransactions.filter(t => t.type === 'INCOME').reduce((sum, t) => sum + t.amount, 0);
-      const exp = validTransactions.filter(t => t.type === 'EXPENSE').reduce((sum, t) => sum + t.amount, 0);
-      
-      totalIncome += inc;
-      totalExpense += exp;
-    }
-
-    let message = title;
-    message += `• Overall Income: ₹${formatINR(totalIncome)}\n`;
-    message += `• Overall Expenses: ₹${formatINR(totalExpense)}\n`;
-
-    if (isSpecific && targetAccounts[0].lastResetAt) {
-       message += `\n_(Note: Income/Expenses reset to zero at ${targetAccounts[0].lastResetAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata'})} because balance dropped below ₹3)_`;
-    }
-
-    ctx.replyWithMarkdown(message);
-  } catch (error) {
-    console.error(error);
-    ctx.reply("Error fetching expenses.");
   }
 });
 
@@ -305,13 +236,6 @@ bot.on('text', async (ctx, next) => {
           where: { id: account.id },
           data: { balance: type === 'INCOME' ? { increment: amount } : { decrement: amount } }
         });
-
-        if (updatedAccount.balance < 3.0) {
-           await prismaTx.account.update({
-             where: { id: account.id },
-             data: { lastResetAt: new Date() }
-           });
-        }
       });
 
       if (type === 'INCOME') {
@@ -433,19 +357,6 @@ bot.command('et', async (ctx) => {
           category: newCategory
         }
       });
-      
-      // Auto reset checks
-      const updatedOld = await prismaTx.account.findUnique({ where: { id: oldTx.accountId } });
-      if (updatedOld && updatedOld.balance < 3.0) {
-        await prismaTx.account.update({ where: { id: updatedOld.id }, data: { lastResetAt: new Date() } });
-      }
-      
-      if (targetAccount.id !== oldTx.accountId) {
-        const updatedNew = await prismaTx.account.findUnique({ where: { id: targetAccount.id } });
-        if (updatedNew && updatedNew.balance < 3.0) {
-          await prismaTx.account.update({ where: { id: updatedNew.id }, data: { lastResetAt: new Date() } });
-        }
-      }
     });
 
     ctx.reply(`Transaction #${id} updated successfully!`);
@@ -483,12 +394,6 @@ bot.command('dt', async (ctx) => {
 
       // Delete record
       await prismaTx.transaction.delete({ where: { id } });
-      
-      // Auto reset check
-      const updatedAccount = await prismaTx.account.findUnique({ where: { id: tx.accountId } });
-      if (updatedAccount && updatedAccount.balance < 3.0) {
-        await prismaTx.account.update({ where: { id: updatedAccount.id }, data: { lastResetAt: new Date() } });
-      }
     });
 
     ctx.reply(`Transaction #${id} has been deleted and balance restored.`);
@@ -566,7 +471,6 @@ bot.command('ai', async (ctx) => {
       - Log Expense: type "-1500 Food @ 1" (1 is the Wallet ID)
       - Log Income: type "+50000 Salary"
       - /bal : Check total balances
-      - /exp : Check total incomes & expenses
       - /his : See transaction history
       - /ca : Create account
       - /dt <ID> : Delete a specific transaction
