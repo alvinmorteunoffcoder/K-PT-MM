@@ -553,7 +553,7 @@ bot.command('ai', async (ctx) => {
     }
 
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // updated model name for safety
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" }); 
     
     const finalPrompt = `
       You are a helpful and extremely intelligent personal finance assistant in a Telegram bot.
