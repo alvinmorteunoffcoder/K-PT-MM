@@ -506,7 +506,9 @@ const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL;
 
 if (WEBHOOK_URL) {
   const secretPath = `/telegraf/${bot.secretPathComponent()}`;
-  bot.telegram.setWebhook(`${WEBHOOK_URL}${secretPath}`);
+  bot.telegram.setWebhook(`${WEBHOOK_URL}${secretPath}`)
+    .then(() => console.log(`Webhook set to ${WEBHOOK_URL}${secretPath}`))
+    .catch((err) => console.error("Failed to set webhook:", err));
   
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/') {
