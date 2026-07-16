@@ -5,10 +5,24 @@ import http from 'http';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
-// Bot is now public and multi-tenant. Anyone can use it!
 
 function formatINR(amount: number): string {
   return amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function resolveAccount(userId: number | bigint, identifier: string) {
+  const accounts = await prisma.account.findMany({
+    where: { userId: BigInt(userId) },
+    orderBy: { createdAt: 'asc' }
+  });
+
+  const parsedId = parseInt(identifier);
+  if (!isNaN(parsedId) && parsedId > 0 && parsedId <= accounts.length) {
+    return accounts[parsedId - 1];
+  }
+
+  const acc = accounts.find(a => a.name.toLowerCase() === identifier.toLowerCase());
+  return acc || null;
 }
 
 const WELCOME_MESSAGE = `
@@ -22,24 +36,24 @@ I am here to help you effortlessly manage your finances. With me, you can track 
 Just type your transaction naturally:
 • Expense: \`-2500 Food\`
 • Income: \`+50000 Salary\`
-• Specific Account: \`-1000 Petrol @ HDFC Bank\`
+• Specific Account: \`-1000 Petrol @ 1\` (or \`@ Wallet Name\`)
 
 📊 **2. Core Commands**
 • /bal - Check balances across all your accounts.
-• /acc - View your list of accounts.
+• /exp - Check your incomes and expenses.
+• /acc - View your list of accounts and their IDs.
 • /his - View your recent transaction history.
 • /ai <question> - Ask your AI financial assistant anything!
 
 🏦 **3. Management Commands**
 • /ca <name> - Create a new account.
-• /ea <old> @ <new> - Rename an account.
-• /da <name> - Delete an account (and its history).
-• /et <id> <+ or -><amount> <category> [@ account] - Edit a transaction.
-• /dt <id> - Delete a transaction.
+• /ea <old name or ID> @ <new name> - Rename an account.
+• /da <name or ID> - Delete an account (and its history).
+• /et <ID> <+ or -><amount> <category> [@ account ID/name] - Edit a transaction.
+• /dt <ID> - Delete a transaction.
 
 Tap /help anytime to see this message again! Let's get tracking! 🚀
 `;
-
 
 bot.start(async (ctx) => {
   const userId = ctx.from.id;
@@ -74,31 +88,22 @@ bot.command('bal', async (ctx) => {
   try {
     const accounts = await prisma.account.findMany({ 
       where: { userId: BigInt(userId) },
-      include: { transactions: true }
+      orderBy: { createdAt: 'asc' }
     });
     if (accounts.length === 0) {
       return ctx.reply("You don't have any accounts. Use /start to create a default one.");
     }
     
     let totalBalance = 0;
-    let totalExpenses = 0;
     let message = "💰 *Your Summary:*\n\n";
     
     for (const acc of accounts) {
-      const accExpenses = acc.transactions
-        .filter(t => t.type === 'EXPENSE')
-        .reduce((sum, t) => sum + t.amount, 0);
-
       message += `*${acc.name}*\n`;
-      message += `• Balance: ₹${formatINR(acc.balance)}\n`;
-      message += `• Expenses: ₹${formatINR(accExpenses)}\n\n`;
-      
+      message += `• Balance: ₹${formatINR(acc.balance)}\n\n`;
       totalBalance += acc.balance;
-      totalExpenses += accExpenses;
     }
     
-    message += `*Overall Balance:* ₹${formatINR(totalBalance)}\n`;
-    message += `*Overall Expenses:* ₹${formatINR(totalExpenses)}`;
+    message += `*Overall Balance:* ₹${formatINR(totalBalance)}`;
     
     ctx.replyWithMarkdown(message);
   } catch (error) {
@@ -107,13 +112,91 @@ bot.command('bal', async (ctx) => {
   }
 });
 
+// /exp [@ account] - Check expenses and incomes
+bot.command('exp', async (ctx) => {
+  const userId = ctx.from.id;
+  const text = ctx.message.text.replace('/exp', '').trim();
+  const identifier = text.startsWith('@') ? text.substring(1).trim() : text;
+
+  try {
+    const accounts = await prisma.account.findMany({ 
+      where: { userId: BigInt(userId) },
+      orderBy: { createdAt: 'asc' },
+      include: { transactions: true }
+    });
+
+    if (accounts.length === 0) {
+      return ctx.reply("You don't have any accounts.");
+    }
+
+    let targetAccounts = accounts;
+    let title = "📊 *Overall Incomes & Expenses:*\n\n";
+    let isSpecific = false;
+
+    if (identifier) {
+      const parsedId = parseInt(identifier);
+      let foundAccount = null;
+      if (!isNaN(parsedId) && parsedId > 0 && parsedId <= accounts.length) {
+        foundAccount = accounts[parsedId - 1];
+      } else {
+        foundAccount = accounts.find(a => a.name.toLowerCase() === identifier.toLowerCase());
+      }
+
+      if (!foundAccount) {
+        return ctx.reply(`Account '${identifier}' not found.`);
+      }
+      targetAccounts = [foundAccount];
+      title = `📊 *Incomes & Expenses for ${foundAccount.name}:*\n\n`;
+      isSpecific = true;
+    }
+    
+    let totalIncome = 0;
+    let totalExpense = 0;
+
+    for (const acc of targetAccounts) {
+      const validTransactions = acc.lastResetAt 
+        ? acc.transactions.filter(t => t.date >= acc.lastResetAt!)
+        : acc.transactions;
+
+      const inc = validTransactions.filter(t => t.type === 'INCOME').reduce((sum, t) => sum + t.amount, 0);
+      const exp = validTransactions.filter(t => t.type === 'EXPENSE').reduce((sum, t) => sum + t.amount, 0);
+      
+      totalIncome += inc;
+      totalExpense += exp;
+    }
+
+    let message = title;
+    message += `• Overall Income: ₹${formatINR(totalIncome)}\n`;
+    message += `• Overall Expenses: ₹${formatINR(totalExpense)}\n`;
+
+    if (isSpecific && targetAccounts[0].lastResetAt) {
+       message += `\n_(Note: Income/Expenses reset to zero at ${targetAccounts[0].lastResetAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata'})} because balance dropped below ₹3)_`;
+    }
+
+    ctx.replyWithMarkdown(message);
+  } catch (error) {
+    console.error(error);
+    ctx.reply("Error fetching expenses.");
+  }
+});
+
 // /acc - View accounts
 bot.command('acc', async (ctx) => {
   const userId = ctx.from.id;
   try {
-    const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
-    const accNames = accounts.map(a => a.name).join(', ');
-    ctx.reply(`Your accounts: ${accNames}\n\nTo create a new account, use: /ca <name>`);
+    const accounts = await prisma.account.findMany({ 
+      where: { userId: BigInt(userId) },
+      orderBy: { createdAt: 'asc' }
+    });
+    if (accounts.length === 0) return ctx.reply("You have no accounts.");
+    
+    let message = "🏦 *Your Accounts:*\n\n";
+    accounts.forEach((acc, index) => {
+      message += `${index + 1}. ${acc.name} (ID: ${index + 1})\n`;
+    });
+    message += `\nTo create a new account, use: /ca <name>\nYou can use IDs instead of names in commands! (e.g. \`@ 1\`)`;
+    
+    ctx.replyWithMarkdown(message);
   } catch(error) {
     ctx.reply("Error fetching accounts.");
   }
@@ -129,25 +212,25 @@ bot.command('ca', async (ctx) => {
     await prisma.account.create({
       data: { userId: BigInt(userId), name, balance: 0.0 }
     });
-    ctx.reply(`Account '${name}' created successfully!`);
+    ctx.reply(`Account '${name}' created successfully! Check /acc to see its ID.`);
   } catch (error) {
     ctx.reply(`Error creating account. It might already exist.`);
   }
 });
 
-// /ea <old_name> @ <new_name> - Edit account
+// /ea <old_name_or_id> @ <new_name> - Edit account
 bot.command('ea', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.replace('/ea', '').trim();
   const parts = text.split('@');
-  if (parts.length !== 2) return ctx.reply("Usage: /ea <old_name> @ <new_name>");
+  if (parts.length !== 2) return ctx.reply("Usage: /ea <old name or ID> @ <new name>");
   
-  const oldName = parts[0].trim();
+  const oldIdentifier = parts[0].trim();
   const newName = parts[1].trim();
 
   try {
-    const account = await prisma.account.findFirst({ where: { userId: BigInt(userId), name: oldName } });
-    if (!account) return ctx.reply(`Account '${oldName}' not found.`);
+    const account = await resolveAccount(userId, oldIdentifier);
+    if (!account) return ctx.reply(`Account '${oldIdentifier}' not found.`);
 
     await prisma.account.update({
       where: { id: account.id },
@@ -159,26 +242,26 @@ bot.command('ea', async (ctx) => {
   }
 });
 
-// /da <name> - Delete account
+// /da <name_or_id> - Delete account
 bot.command('da', async (ctx) => {
   const userId = ctx.from.id;
-  const name = ctx.message.text.replace('/da', '').trim();
-  if (!name) return ctx.reply("Usage: /da <account_name>");
-
-  if (name.toLowerCase() === 'main wallet') {
-    return ctx.reply("You cannot delete the 'Main Wallet' account.");
-  }
+  const identifier = ctx.message.text.replace('/da', '').trim();
+  if (!identifier) return ctx.reply("Usage: /da <account name or ID>");
 
   try {
-    const account = await prisma.account.findFirst({ where: { userId: BigInt(userId), name } });
-    if (!account) return ctx.reply(`Account '${name}' not found.`);
+    const account = await resolveAccount(userId, identifier);
+    if (!account) return ctx.reply(`Account '${identifier}' not found.`);
+
+    if (account.name.toLowerCase() === 'main wallet') {
+      return ctx.reply("You cannot delete the 'Main Wallet' account.");
+    }
 
     await prisma.$transaction([
       prisma.transaction.deleteMany({ where: { accountId: account.id } }),
       prisma.account.delete({ where: { id: account.id } })
     ]);
     
-    ctx.reply(`Account '${name}' and all its transactions have been deleted.`);
+    ctx.reply(`Account '${account.name}' and all its transactions have been deleted. Wallet IDs have been updated.`);
   } catch (error) {
     console.error(error);
     ctx.reply("Error deleting account.");
@@ -193,22 +276,22 @@ bot.on('text', async (ctx, next) => {
   // Ignore commands
   if (text.startsWith('/')) return next();
 
-  // Match something like "-2500 Food" or "+2500 Salary @ Bank"
+  // Match something like "-2500 Food" or "+2500 Salary @ 1"
   const match = text.match(/^([+-])(\d+(?:\.\d+)?)\s+([^@]+)(?:\s+@\s+(.+))?$/);
   
   if (match) {
     const sign = match[1];
     const amount = parseFloat(match[2]);
     const category = match[3].trim();
-    const accountName = match[4] ? match[4].trim() : 'Main Wallet';
+    const accountIdentifier = match[4] ? match[4].trim() : 'Main Wallet';
     const type = sign === '+' ? 'INCOME' : 'EXPENSE';
 
     try {
-      const account = await prisma.account.findFirst({ where: { userId: BigInt(userId), name: accountName } });
-      if (!account) return ctx.reply(`Account '${accountName}' not found.`);
+      const account = await resolveAccount(userId, accountIdentifier);
+      if (!account) return ctx.reply(`Account '${accountIdentifier}' not found.`);
 
-      await prisma.$transaction([
-        prisma.transaction.create({
+      await prisma.$transaction(async (prismaTx) => {
+        await prismaTx.transaction.create({
           data: {
             accountId: account.id,
             type,
@@ -216,17 +299,25 @@ bot.on('text', async (ctx, next) => {
             category,
             description: ''
           }
-        }),
-        prisma.account.update({
+        });
+
+        const updatedAccount = await prismaTx.account.update({
           where: { id: account.id },
           data: { balance: type === 'INCOME' ? { increment: amount } : { decrement: amount } }
-        })
-      ]);
+        });
+
+        if (updatedAccount.balance < 3.0) {
+           await prismaTx.account.update({
+             where: { id: account.id },
+             data: { lastResetAt: new Date() }
+           });
+        }
+      });
 
       if (type === 'INCOME') {
-        ctx.reply(`✅ Income recorded! +₹${formatINR(amount)} from ${category} (to ${accountName}).`);
+        ctx.reply(`✅ Income recorded! +₹${formatINR(amount)} from ${category} (to ${account.name}).`);
       } else {
-        ctx.reply(`📉 Expense recorded! -₹${formatINR(amount)} for ${category} (from ${accountName}).`);
+        ctx.reply(`📉 Expense recorded! -₹${formatINR(amount)} for ${category} (from ${account.name}).`);
       }
       return;
     } catch (error) {
@@ -242,9 +333,20 @@ bot.on('text', async (ctx, next) => {
 // /his - History
 bot.command('his', async (ctx) => {
   const userId = ctx.from.id;
+  const text = ctx.message.text.replace('/his', '').trim();
+  const identifier = text.startsWith('@') ? text.substring(1).trim() : text;
+
   try {
-    const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
-    const accountIds = accounts.map(a => a.id);
+    let accountIds: number[] = [];
+    
+    if (identifier) {
+      const account = await resolveAccount(userId, identifier);
+      if (!account) return ctx.reply(`Account '${identifier}' not found.`);
+      accountIds = [account.id];
+    } else {
+      const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
+      accountIds = accounts.map(a => a.id);
+    }
 
     const transactions = await prisma.transaction.findMany({
       where: { accountId: { in: accountIds } },
@@ -255,14 +357,14 @@ bot.command('his', async (ctx) => {
 
     if (transactions.length === 0) return ctx.reply("No transactions found.");
 
-    let message = "📝 *Recent Transactions:*\n\n";
+    let message = identifier ? `📝 *Recent Transactions for ${transactions[0].account.name}:*\n\n` : "📝 *Recent Transactions:*\n\n";
     for (const t of transactions) {
       const sign = t.type === 'INCOME' ? '+' : '-';
       message += `\`[ID:${t.id}]\` ${t.date.toISOString().split('T')[0]} | ${t.account.name}\n`;
       message += `${sign}₹${formatINR(t.amount)} - ${t.category}\n\n`;
     }
     
-    message += "To edit a transaction, use: /et <ID> <+ or -><amount> <category> [@ account]";
+    message += "To edit a transaction, use: /et <ID> <+ or -><amount> <category> [@ account ID/name]";
     ctx.replyWithMarkdown(message);
   } catch (error) {
     console.error(error);
@@ -275,20 +377,18 @@ bot.command('et', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.replace('/et', '').trim();
   
-  // Example: "5 -3000 Groceries @ Bank"
   const match = text.match(/^(\d+)\s+([+-])(\d+(?:\.\d+)?)\s+([^@]+)(?:\s+@\s+(.+))?$/);
   
-  if (!match) return ctx.reply("Usage: /et <ID> <+ or -><amount> <category> [@ account]");
+  if (!match) return ctx.reply("Usage: /et <ID> <+ or -><amount> <category> [@ account ID/name]");
   
   const id = parseInt(match[1]);
   const sign = match[2];
   const newAmount = parseFloat(match[3]);
   const newCategory = match[4].trim();
-  const newAccountName = match[5] ? match[5].trim() : null;
+  const newAccountIdentifier = match[5] ? match[5].trim() : null;
   const newType = sign === '+' ? 'INCOME' : 'EXPENSE';
 
   try {
-    // 1. Fetch old transaction and verify ownership
     const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
     const accountIds = accounts.map(a => a.id);
     
@@ -301,15 +401,13 @@ bot.command('et', async (ctx) => {
       return ctx.reply("Transaction not found.");
     }
 
-    // 2. Resolve new account
     let targetAccount = oldTx.account;
-    if (newAccountName && newAccountName !== oldTx.account.name) {
-      const found = await prisma.account.findFirst({ where: { userId: BigInt(userId), name: newAccountName } });
-      if (!found) return ctx.reply(`Account '${newAccountName}' not found.`);
+    if (newAccountIdentifier) {
+      const found = await resolveAccount(userId, newAccountIdentifier);
+      if (!found) return ctx.reply(`Account '${newAccountIdentifier}' not found.`);
       targetAccount = found;
     }
 
-    // 3. Revert old transaction and apply new transaction in a single query transaction
     await prisma.$transaction(async (prismaTx) => {
       // Revert old
       if (oldTx.type === 'INCOME') {
@@ -335,6 +433,19 @@ bot.command('et', async (ctx) => {
           category: newCategory
         }
       });
+      
+      // Auto reset checks
+      const updatedOld = await prismaTx.account.findUnique({ where: { id: oldTx.accountId } });
+      if (updatedOld && updatedOld.balance < 3.0) {
+        await prismaTx.account.update({ where: { id: updatedOld.id }, data: { lastResetAt: new Date() } });
+      }
+      
+      if (targetAccount.id !== oldTx.accountId) {
+        const updatedNew = await prismaTx.account.findUnique({ where: { id: targetAccount.id } });
+        if (updatedNew && updatedNew.balance < 3.0) {
+          await prismaTx.account.update({ where: { id: updatedNew.id }, data: { lastResetAt: new Date() } });
+        }
+      }
     });
 
     ctx.reply(`Transaction #${id} updated successfully!`);
@@ -372,6 +483,12 @@ bot.command('dt', async (ctx) => {
 
       // Delete record
       await prismaTx.transaction.delete({ where: { id } });
+      
+      // Auto reset check
+      const updatedAccount = await prismaTx.account.findUnique({ where: { id: tx.accountId } });
+      if (updatedAccount && updatedAccount.balance < 3.0) {
+        await prismaTx.account.update({ where: { id: updatedAccount.id }, data: { lastResetAt: new Date() } });
+      }
     });
 
     ctx.reply(`Transaction #${id} has been deleted and balance restored.`);
@@ -402,29 +519,41 @@ bot.command('ai', async (ctx) => {
   try {
     const processingMsg = await ctx.reply("🤔 *Analyzing your finances...*", { parse_mode: "Markdown" });
 
-    // Fetch user's transactions
+    // Fetch user's accounts
     const accounts = await prisma.account.findMany({ 
       where: { userId: BigInt(userId) },
-      include: { transactions: { orderBy: { date: 'desc' } } }
+      orderBy: { createdAt: 'asc' }
     });
 
     if (accounts.length === 0) {
       return ctx.reply("You don't have any accounts or transactions yet to analyze.");
     }
+    
+    const accountIds = accounts.map(a => a.id);
+    
+    // Fetch only the LAST 50 transactions to prevent memory/context overload
+    const recentTransactions = await prisma.transaction.findMany({
+      where: { accountId: { in: accountIds } },
+      orderBy: { date: 'desc' },
+      take: 50,
+      include: { account: true }
+    });
 
-    let txData = "User's financial data:\n\n";
-    for (const acc of accounts) {
-      txData += `Account: ${acc.name} (Balance: ₹${acc.balance})\n`;
-      txData += `Transactions:\n`;
-      for (const t of acc.transactions) {
-        const sign = t.type === 'INCOME' ? '+' : '-';
-        txData += `${t.date.toISOString().split('T')[0]} | ${t.category} | ${sign}₹${t.amount}\n`;
-      }
-      txData += "\n";
+    let txData = "User's financial data (Latest 50 transactions only to save context limits):\n\n";
+    
+    // Summary of balances
+    for (let i = 0; i < accounts.length; i++) {
+       txData += `Account: ${accounts[i].name} (ID: ${i + 1}) - Balance: ₹${accounts[i].balance}\n`;
+    }
+    txData += "\nRecent Transactions:\n";
+    
+    for (const t of recentTransactions) {
+      const sign = t.type === 'INCOME' ? '+' : '-';
+      txData += `${t.date.toISOString().split('T')[0]} | Account: ${t.account.name} | ${t.category} | ${sign}₹${t.amount}\n`;
     }
 
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // updated model name for safety
     
     const finalPrompt = `
       You are a helpful and extremely intelligent personal finance assistant in a Telegram bot.
@@ -434,9 +563,10 @@ bot.command('ai', async (ctx) => {
       Answer questions about their finances accurately based ONLY on this data. 
       
       If the user asks how to use the bot or check things, here are the bot's commands:
-      - Log Expense: type "-1500 Food"
+      - Log Expense: type "-1500 Food @ 1" (1 is the Wallet ID)
       - Log Income: type "+50000 Salary"
-      - /bal : Check total balances and expenses
+      - /bal : Check total balances
+      - /exp : Check total incomes & expenses
       - /his : See transaction history
       - /ca : Create account
       - /dt <ID> : Delete a specific transaction
@@ -471,19 +601,22 @@ const PORT = Number(process.env.PORT) || 3000;
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL;
 
 if (WEBHOOK_URL) {
-  // Production on Render: Use Webhook
-  bot.launch({
-    webhook: {
-      domain: WEBHOOK_URL,
-      port: PORT
+  const secretPath = `/telegraf/${bot.secretPathComponent()}`;
+  bot.telegram.setWebhook(`${WEBHOOK_URL}${secretPath}`);
+  
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/') {
+      res.writeHead(200);
+      res.end('Bot is awake and ready!');
+    } else {
+      bot.webhookCallback(secretPath)(req, res);
     }
-  }).then(() => {
+  });
+
+  server.listen(PORT, () => {
     console.log(`Bot is running in Webhook mode at ${WEBHOOK_URL} on port ${PORT}`);
-  }).catch((err) => {
-    console.error("Failed to start bot in Webhook mode:", err);
   });
 } else {
-  // Local Development: Use Polling and start a dummy HTTP server if PORT is set
   const server = http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Bot is running in polling mode!');

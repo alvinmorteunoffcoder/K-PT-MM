@@ -22,6 +22,7 @@ model Account {
   name         String        // e.g., "Main Wallet", "Bank"
   balance      Float         @default(0.0)
   transactions Transaction[]
+  lastResetAt  DateTime?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
