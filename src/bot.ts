@@ -2,7 +2,7 @@ import { Telegraf } from 'telegraf';
 import 'dotenv/config';
 import prisma from './db';
 import http from 'http';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 
@@ -42,7 +42,6 @@ Just type your transaction naturally:
 • /bal - Check balances across all your accounts.
 • /acc - View your list of accounts and their IDs.
 • /his - View your recent transaction history.
-• /ai <question> - Ask your AI financial assistant anything!
 
 🏦 **3. Management Commands**
 • /ca <name> - Create a new account.
@@ -50,6 +49,11 @@ Just type your transaction naturally:
 • /da <name or ID> - Delete an account (and its history).
 • /et <ID> <+ or -><amount> <category> [@ account ID/name] - Edit a transaction.
 • /dt <ID> - Delete a transaction.
+
+🔧 **4. Utility Commands**
+• /trf <amount> <from> @ <to> - Transfer money between accounts.
+• /z - Undo your last transaction.
+• /rz <account name or ID> - Reset an account balance to zero.
 
 Tap /help anytime to see this message again! Let's get tracking! 🚀
 `;
@@ -408,94 +412,163 @@ bot.command(['hlp', 'help'], (ctx) => {
   ctx.replyWithMarkdown(WELCOME_MESSAGE);
 });
 
-// /ai <question> - AI Financial Assistant
-bot.command('ai', async (ctx) => {
+// /trf <amount> <from> [@ or to] <to> - Transfer between accounts
+bot.command('trf', async (ctx) => {
   const userId = ctx.from.id;
-  const prompt = ctx.message.text.replace('/ai', '').trim();
-  
-  if (!prompt) {
-    return ctx.reply("Please ask a question! For example: /ai how much did I spend on food?");
+  const text = ctx.message.text.replace(/^\/trf(@\w+)?\s*/, '').trim();
+
+  let amount: number | null = null;
+  let fromIdentifier: string | null = null;
+  let toIdentifier: string | null = null;
+
+  // Try matching: 500 1 @ 2 or 500 Main Wallet @ Bank
+  const atMatch = text.match(/^(\d+(?:\.\d+)?)\s+([^@]+)\s+@\s+(.+)$/);
+  if (atMatch) {
+    amount = parseFloat(atMatch[1]);
+    fromIdentifier = atMatch[2].trim();
+    toIdentifier = atMatch[3].trim();
+  } else {
+    // Try matching: 500 1 2 or 500 1 to 2
+    const spaceMatch = text.match(/^(\d+(?:\.\d+)?)\s+(\S+)\s+(?:to\s+)?(\S+)$/i);
+    if (spaceMatch) {
+      amount = parseFloat(spaceMatch[1]);
+      fromIdentifier = spaceMatch[2].trim();
+      toIdentifier = spaceMatch[3].trim();
+    }
   }
 
-  if (!process.env.GEMINI_API_KEY) {
-    return ctx.reply("AI is not configured. Please set the GEMINI_API_KEY environment variable.");
+  if (!amount || !fromIdentifier || !toIdentifier || isNaN(amount)) {
+    return ctx.reply("Usage: /trf <amount> <from account> @ <to account>\nExamples:\n• /trf 500 1 @ 2\n• /trf 500 Main Wallet @ Bank\n• /trf 500 1 2");
   }
+
+  if (amount <= 0) return ctx.reply("Amount must be greater than zero.");
 
   try {
-    const processingMsg = await ctx.reply("🤔 *Analyzing your finances...*", { parse_mode: "Markdown" });
+    const fromAccount = await resolveAccount(userId, fromIdentifier);
+    if (!fromAccount) return ctx.reply(`Source account '${fromIdentifier}' not found.`);
 
-    // Fetch user's accounts
-    const accounts = await prisma.account.findMany({ 
-      where: { userId: BigInt(userId) },
-      orderBy: { createdAt: 'asc' }
+    const toAccount = await resolveAccount(userId, toIdentifier);
+    if (!toAccount) return ctx.reply(`Destination account '${toIdentifier}' not found.`);
+
+    if (fromAccount.id === toAccount.id) return ctx.reply("Cannot transfer to the same account.");
+
+    await prisma.$transaction(async (prismaTx) => {
+      await prismaTx.account.update({
+        where: { id: fromAccount.id },
+        data: { balance: { decrement: amount } }
+      });
+      await prismaTx.account.update({
+        where: { id: toAccount.id },
+        data: { balance: { increment: amount } }
+      });
+      await prismaTx.transaction.create({
+        data: {
+          accountId: fromAccount.id,
+          type: 'EXPENSE',
+          amount,
+          category: `Transfer to ${toAccount.name}`,
+          description: ''
+        }
+      });
+      await prismaTx.transaction.create({
+        data: {
+          accountId: toAccount.id,
+          type: 'INCOME',
+          amount,
+          category: `Transfer from ${fromAccount.name}`,
+          description: ''
+        }
+      });
     });
 
-    if (accounts.length === 0) {
-      return ctx.reply("You don't have any accounts or transactions yet to analyze.");
+    ctx.reply(`🔄 Transferred ₹${formatINR(amount)} from ${fromAccount.name} → ${toAccount.name}`);
+  } catch (error) {
+    console.error(error);
+    ctx.reply("Error processing transfer.");
+  }
+});
+
+// /z [account] - Undo last transaction (globally or for specific account)
+bot.command('z', async (ctx) => {
+  const userId = ctx.from.id;
+  const identifier = ctx.message.text.replace(/^\/z(@\w+)?\s*/, '').trim();
+
+  try {
+    let accountIds: number[] = [];
+    if (identifier) {
+      const account = await resolveAccount(userId, identifier);
+      if (!account) return ctx.reply(`Account '${identifier}' not found.`);
+      accountIds = [account.id];
+    } else {
+      const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
+      if (accounts.length === 0) return ctx.reply("You don't have any accounts.");
+      accountIds = accounts.map(a => a.id);
     }
-    
-    const accountIds = accounts.map(a => a.id);
-    
-    // Fetch only the LAST 50 transactions to prevent memory/context overload
-    const recentTransactions = await prisma.transaction.findMany({
+
+    const lastTx = await prisma.transaction.findFirst({
       where: { accountId: { in: accountIds } },
-      orderBy: { date: 'desc' },
-      take: 50,
+      orderBy: { id: 'desc' },
       include: { account: true }
     });
 
-    let txData = "User's financial data (Latest 50 transactions only to save context limits):\n\n";
-    
-    // Summary of balances
-    for (let i = 0; i < accounts.length; i++) {
-       txData += `Account: ${accounts[i].name} (ID: ${i + 1}) - Balance: ₹${accounts[i].balance}\n`;
-    }
-    txData += "\nRecent Transactions:\n";
-    
-    for (const t of recentTransactions) {
-      const sign = t.type === 'INCOME' ? '+' : '-';
-      txData += `${t.date.toISOString().split('T')[0]} | Account: ${t.account.name} | ${t.category} | ${sign}₹${t.amount}\n`;
-    }
+    if (!lastTx) return ctx.reply("No transactions to undo.");
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" }); 
-    
-    const finalPrompt = `
-      You are a helpful and extremely intelligent personal finance assistant in a Telegram bot.
-      Your name is "dood". Introduce yourself as dood if asked.
-      You are happy to chat casually with the user (e.g. "hi how are you?") and answer general finance questions.
-      You also have access to the user's transaction data below. 
-      Answer questions about their finances accurately based ONLY on this data. 
-      
-      If the user asks how to use the bot or check things, here are the bot's commands:
-      - Log Expense: type "-1500 Food @ 1" (1 is the Wallet ID)
-      - Log Income: type "+50000 Salary"
-      - /bal : Check total balances
-      - /his : See transaction history
-      - /ca : Create account
-      - /dt <ID> : Delete a specific transaction
-      - /da <Account> : Delete an account and all its transactions
-      
-      If the user asks to clear, delete, or reset their transactions, politely explain that you (the AI) cannot do that directly, but they can use the /dt or /da commands to do it themselves.
-      
-      Format your response beautifully with markdown, emojis, and a highly friendly, conversational tone. Do not expose internal IDs unless instructing them to use /dt.
-      If the user asks something completely unrelated to finance or casual greetings, politely redirect them.
-      
-      ${txData}
-      
-      User's Question: "${prompt}"
-    `;
+    await prisma.$transaction(async (prismaTx) => {
+      if (lastTx.type === 'INCOME') {
+        await prismaTx.account.update({ where: { id: lastTx.accountId }, data: { balance: { decrement: lastTx.amount } } });
+      } else {
+        await prismaTx.account.update({ where: { id: lastTx.accountId }, data: { balance: { increment: lastTx.amount } } });
+      }
+      await prismaTx.transaction.delete({ where: { id: lastTx.id } });
+    });
 
-    const result = await model.generateContent(finalPrompt);
-    const text = result.response.text();
-
-    await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id);
-    ctx.replyWithMarkdown(text);
+    const sign = lastTx.type === 'INCOME' ? '+' : '-';
+    ctx.reply(`↩️ Undone: ${sign}₹${formatINR(lastTx.amount)} for ${lastTx.category} (${lastTx.account.name})`);
   } catch (error) {
-    console.error("AI Error:", error);
-    ctx.reply("Sorry, I had trouble analyzing that. Please try again later!");
+    console.error(error);
+    ctx.reply("Error undoing transaction.");
   }
 });
+
+// /rz <account name or ID> - Reset account balance to zero
+bot.command('rz', async (ctx) => {
+  const userId = ctx.from.id;
+  const identifier = ctx.message.text.replace(/^\/rz(@\w+)?\s*/, '').trim();
+  if (!identifier) return ctx.reply("Usage: /rz <account name or ID>");
+
+  try {
+    const account = await resolveAccount(userId, identifier);
+    if (!account) return ctx.reply(`Account '${identifier}' not found.`);
+
+    const oldBalance = account.balance;
+
+    await prisma.account.update({
+      where: { id: account.id },
+      data: { balance: 0.0 }
+    });
+
+    ctx.reply(`🔄 Account '${account.name}' balance reset from ₹${formatINR(oldBalance)} to ₹0.00`);
+  } catch (error) {
+    console.error(error);
+    ctx.reply("Error resetting balance.");
+  }
+});
+
+// Register commands list in Telegram UI menu
+bot.telegram.setMyCommands([
+  { command: 'bal', description: 'Check account balances' },
+  { command: 'acc', description: 'View list of accounts and IDs' },
+  { command: 'his', description: 'View recent transaction history' },
+  { command: 'ca', description: 'Create a new account' },
+  { command: 'ea', description: 'Rename an account' },
+  { command: 'da', description: 'Delete an account and its history' },
+  { command: 'et', description: 'Edit a transaction' },
+  { command: 'dt', description: 'Delete a transaction' },
+  { command: 'trf', description: 'Transfer money between accounts' },
+  { command: 'z', description: 'Undo last transaction' },
+  { command: 'rz', description: 'Reset account balance to 0' },
+  { command: 'help', description: 'Show welcome message & guide' },
+]).catch(err => console.error("Failed to set bot commands menu:", err));
 
 bot.catch((err, ctx) => {
   console.error(`Ooops, encountered an error for ${ctx.updateType}`, err);
