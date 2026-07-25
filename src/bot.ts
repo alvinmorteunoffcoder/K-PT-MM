@@ -370,6 +370,57 @@ bot.command('et', async (ctx) => {
   }
 });
 
+async function deleteTransactionWithPair(prismaTx: any, tx: any) {
+  let pairTx: any = null;
+
+  if (tx.description && tx.description.startsWith('TRANSFER_PAIR:')) {
+    const pairId = parseInt(tx.description.split(':')[1]);
+    if (!isNaN(pairId)) {
+      pairTx = await prismaTx.transaction.findUnique({ where: { id: pairId }, include: { account: true } });
+    }
+  }
+
+  if (!pairTx && (tx.category.startsWith('Transfer to ') || tx.category.startsWith('Transfer from '))) {
+    const searchCategory = tx.category.startsWith('Transfer to ')
+      ? `Transfer from ${tx.account.name}`
+      : `Transfer to ${tx.account.name}`;
+
+    pairTx = await prismaTx.transaction.findFirst({
+      where: {
+        id: { not: tx.id },
+        category: searchCategory,
+        amount: tx.amount,
+        type: tx.type === 'INCOME' ? 'EXPENSE' : 'INCOME',
+        date: {
+          gte: new Date(tx.date.getTime() - 120000),
+          lte: new Date(tx.date.getTime() + 120000)
+        }
+      },
+      include: { account: true }
+    });
+  }
+
+  // Revert main tx balance
+  if (tx.type === 'INCOME') {
+    await prismaTx.account.update({ where: { id: tx.accountId }, data: { balance: { decrement: tx.amount } } });
+  } else {
+    await prismaTx.account.update({ where: { id: tx.accountId }, data: { balance: { increment: tx.amount } } });
+  }
+  await prismaTx.transaction.delete({ where: { id: tx.id } });
+
+  // Revert pair tx balance if exists
+  if (pairTx) {
+    if (pairTx.type === 'INCOME') {
+      await prismaTx.account.update({ where: { id: pairTx.accountId }, data: { balance: { decrement: pairTx.amount } } });
+    } else {
+      await prismaTx.account.update({ where: { id: pairTx.accountId }, data: { balance: { increment: pairTx.amount } } });
+    }
+    await prismaTx.transaction.delete({ where: { id: pairTx.id } });
+  }
+
+  return pairTx;
+}
+
 // /dt <id> - Delete Transaction
 bot.command('dt', async (ctx) => {
   const userId = ctx.from.id;
@@ -382,25 +433,22 @@ bot.command('dt', async (ctx) => {
     const accounts = await prisma.account.findMany({ where: { userId: BigInt(userId) } });
     const accountIds = accounts.map(a => a.id);
     
-    const tx = await prisma.transaction.findUnique({ where: { id } });
+    const tx = await prisma.transaction.findUnique({ where: { id }, include: { account: true } });
 
     if (!tx || !accountIds.includes(tx.accountId)) {
       return ctx.reply("Transaction not found.");
     }
 
+    let pairTx: any = null;
     await prisma.$transaction(async (prismaTx) => {
-      // Revert balance
-      if (tx.type === 'INCOME') {
-        await prismaTx.account.update({ where: { id: tx.accountId }, data: { balance: { decrement: tx.amount } }});
-      } else {
-        await prismaTx.account.update({ where: { id: tx.accountId }, data: { balance: { increment: tx.amount } }});
-      }
-
-      // Delete record
-      await prismaTx.transaction.delete({ where: { id } });
+      pairTx = await deleteTransactionWithPair(prismaTx, tx);
     });
 
-    ctx.reply(`Transaction #${id} has been deleted and balance restored.`);
+    if (pairTx) {
+      ctx.reply(`Transaction #${id} (and paired transfer #${pairTx.id}) deleted and balances restored.`);
+    } else {
+      ctx.reply(`Transaction #${id} has been deleted and balance restored.`);
+    }
   } catch (error) {
     console.error(error);
     ctx.reply("Error deleting transaction.");
@@ -461,7 +509,7 @@ bot.command('trf', async (ctx) => {
         where: { id: toAccount.id },
         data: { balance: { increment: amount } }
       });
-      await prismaTx.transaction.create({
+      const tx1 = await prismaTx.transaction.create({
         data: {
           accountId: fromAccount.id,
           type: 'EXPENSE',
@@ -470,14 +518,18 @@ bot.command('trf', async (ctx) => {
           description: ''
         }
       });
-      await prismaTx.transaction.create({
+      const tx2 = await prismaTx.transaction.create({
         data: {
           accountId: toAccount.id,
           type: 'INCOME',
           amount,
           category: `Transfer from ${fromAccount.name}`,
-          description: ''
+          description: `TRANSFER_PAIR:${tx1.id}`
         }
+      });
+      await prismaTx.transaction.update({
+        where: { id: tx1.id },
+        data: { description: `TRANSFER_PAIR:${tx2.id}` }
       });
     });
 
@@ -513,17 +565,17 @@ bot.command('z', async (ctx) => {
 
     if (!lastTx) return ctx.reply("No transactions to undo.");
 
+    let pairTx: any = null;
     await prisma.$transaction(async (prismaTx) => {
-      if (lastTx.type === 'INCOME') {
-        await prismaTx.account.update({ where: { id: lastTx.accountId }, data: { balance: { decrement: lastTx.amount } } });
-      } else {
-        await prismaTx.account.update({ where: { id: lastTx.accountId }, data: { balance: { increment: lastTx.amount } } });
-      }
-      await prismaTx.transaction.delete({ where: { id: lastTx.id } });
+      pairTx = await deleteTransactionWithPair(prismaTx, lastTx);
     });
 
-    const sign = lastTx.type === 'INCOME' ? '+' : '-';
-    ctx.reply(`↩️ Undone: ${sign}₹${formatINR(lastTx.amount)} for ${lastTx.category} (${lastTx.account.name})`);
+    if (pairTx) {
+      ctx.reply(`↩️ Undone Transfer: ₹${formatINR(lastTx.amount)} between ${lastTx.account.name} & ${pairTx.account.name}`);
+    } else {
+      const sign = lastTx.type === 'INCOME' ? '+' : '-';
+      ctx.reply(`↩️ Undone: ${sign}₹${formatINR(lastTx.amount)} for ${lastTx.category} (${lastTx.account.name})`);
+    }
   } catch (error) {
     console.error(error);
     ctx.reply("Error undoing transaction.");
